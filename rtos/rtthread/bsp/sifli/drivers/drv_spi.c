@@ -757,11 +757,13 @@ __ROM_USED rt_err_t rt_hw_spi_device_attach(const char *bus_name, const char *de
     if (result != RT_EOK)
     {
         LOG_E("%s attach to %s faild, %d\n", device_name, bus_name, result);
+        rt_free(spi_device);
+        spi_device = RT_NULL;
     }
-
-    RT_ASSERT(result == RT_EOK);
-
-    LOG_D("%s attach to %s done", device_name, bus_name);
+    else
+    {
+        LOG_D("%s attach to %s done", device_name, bus_name);
+    }
 
     return result;
 }

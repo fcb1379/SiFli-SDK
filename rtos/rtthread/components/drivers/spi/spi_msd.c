@@ -636,6 +636,13 @@ static rt_err_t rt_msd_init(rt_device_t dev)
                 result = _send_cmd(msd->spi_device, SEND_IF_COND, 0x01AA, 0x87, response_r7, response);
                 rt_spi_release(msd->spi_device);
 
+                if (rt_tick_timeout(tick_start, rt_tick_from_millisecond(200)))
+                {
+                    MSD_DEBUG("[err] CMD8 SEND_IF_COND timeout!\r\n");
+                    result = RT_ETIMEOUT;
+                    goto _exit;
+                }
+
                 if (result == RT_EOK)
                 {
                     MSD_DEBUG("[info] CMD8 response : 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\r\n",
@@ -661,15 +668,6 @@ static rt_err_t rt_msd_init(rt_device_t dev)
                         /* SD2.0 not support current voltage */
                         MSD_DEBUG("[err] VCA = 0, SD2.0 not surpport current operation voltage range\r\n");
                         result = RT_ERROR;
-                        goto _exit;
-                    }
-                }
-                else
-                {
-                    if (rt_tick_timeout(tick_start, rt_tick_from_millisecond(200)))
-                    {
-                        MSD_DEBUG("[err] CMD8 SEND_IF_COND timeout!\r\n");
-                        result = RT_ETIMEOUT;
                         goto _exit;
                     }
                 }
@@ -1874,8 +1872,28 @@ int rt_spi_msd_init(void)
         }
     }
     rt_device_t spi_dev = rt_device_find("sdcard");
-    if (rt_device_open(spi_dev,  RT_DEVICE_FLAG_DMA_RX | RT_DEVICE_FLAG_DMA_TX | RT_DEVICE_FLAG_RDWR) != RT_EOK)
+    if (spi_dev == RT_NULL)
+    {
+        rt_kprintf("[SD] SPI1 device not found !\n");
+        return RT_ERROR;
+    }
+
+    rt_uint16_t usOpenFlags = RT_DEVICE_FLAG_RDWR;
+
+    if (0U != (spi_dev->flag & RT_DEVICE_FLAG_DMA_RX))
+    {
+        usOpenFlags |= RT_DEVICE_FLAG_DMA_RX;
+    }
+    if (0U != (spi_dev->flag & RT_DEVICE_FLAG_DMA_TX))
+    {
+        usOpenFlags |= RT_DEVICE_FLAG_DMA_TX;
+    }
+
+    if (rt_device_open(spi_dev, usOpenFlags) != RT_EOK)
+    {
         rt_kprintf("[SD] OPEN SPI1 FAIL !\n");
+        return RT_ERROR;
+    }
 
     if (msd_init("sd0", "sdcard") != RT_EOK)
     {
@@ -1898,4 +1916,6 @@ int rt_spi_msd_init(void)
     return RT_EOK;
 }
 
+#ifdef RT_SPI_MSD_AUTO_INIT
 INIT_PREV_EXPORT(rt_spi_msd_init);
+#endif /* RT_SPI_MSD_AUTO_INIT */

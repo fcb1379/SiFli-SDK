@@ -236,6 +236,14 @@ config RT_USING_SPI
             select RT_USING_DFS
             default n
 
+        config RT_SPI_MSD_AUTO_INIT
+            bool "Initialize the SPI SD/TF card during system startup"
+            depends on RT_USING_SPI_MSD
+            default y
+            help
+                Disable this option when the board has a card-detect GPIO and
+                the application initializes the card only after insertion.
+
         config RT_USING_SFUD
             bool "Using Serial Flash Universal Driver"
             default n
