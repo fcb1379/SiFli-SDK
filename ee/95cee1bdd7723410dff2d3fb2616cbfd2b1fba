@@ -1,0 +1,33 @@
+rtos/rtthread/bsp/sifli/drivers/drv_spi.c
+  s_b2058e519504b1::t_2ecc5e7908a677 760-765
+rtos/rtthread/components/drivers/Kconfig
+  s_b2058e519504b1::t_2454fde8219c56 239-246
+rtos/rtthread/components/drivers/spi/spi_msd.c
+  s_b2058e519504b1::t_2454fde8219c56 1875-1878,1895-1896,1919,1921
+  s_b2058e519504b1::t_2807170793e422 1879-1893
+  s_1d2c1a9df4a2e7::t_a5fec4dc458f77 639-645
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "ee95cee1bdd7723410dff2d3fb2616cbfd2b1fba",
+  "prompts": {},
+  "sessions": {
+    "s_1d2c1a9df4a2e7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc647-59e5-7810-b4a2-5c92f96cf60c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "qinmenghuai <qinmenghuai@wondertechlabs.com>"
+    },
+    "s_b2058e519504b1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd0fc-e4c1-7bb2-999b-24b473d28dd3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "qinmenghuai <qinmenghuai@wondertechlabs.com>"
+    }
+  }
+}
