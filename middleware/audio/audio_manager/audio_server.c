@@ -115,6 +115,30 @@
 #define FADE_VOLUME_STEP        4
 #define FADE_INTERVAL_MS        10
 
+#define AUDIO_DIAG_PHASE_SPEAKER_OPEN_BEGIN (0xA110U)
+#define AUDIO_DIAG_PHASE_AUDPRC_START_BEGIN (0xA111U)
+#define AUDIO_DIAG_PHASE_AUDPRC_START_DONE (0xA112U)
+#define AUDIO_DIAG_PHASE_CODEC_START_BEGIN (0xA113U)
+#define AUDIO_DIAG_PHASE_CODEC_START_DONE (0xA114U)
+#define AUDIO_DIAG_PHASE_PA_START_BEGIN (0xA115U)
+#define AUDIO_DIAG_PHASE_DAC_UNMUTE_BEGIN (0xA119U)
+#define AUDIO_DIAG_PHASE_SPEAKER_OPEN_DONE (0xA11AU)
+#define AUDIO_DIAG_PHASE_TX_IRQ_ENTER (0xA11BU)
+#define AUDIO_DIAG_PHASE_TX_BUFFER_BEGIN (0xA11CU)
+#define AUDIO_DIAG_PHASE_TX_BUFFER_DONE (0xA11DU)
+#define AUDIO_DIAG_PHASE_TX_IRQ_EXIT (0xA11EU)
+
+/* First-TX-IRQ diagnostic latch, range 0~1; reset for every speaker open and
+ * cleared after the first DMA callback so normal playback has no hook cost. */
+static uint8_t g_ucAudioDiagnosticTrackFirstTxIrq;
+
+RT_WEAK void AUDIODIAG_ServerStageHook(uint16_t usPhase)
+{
+    (void)usPhase;
+
+    return;
+}
+
 #define AUDIO_DATA_CAPTURE_UART
 
 #if defined (AUDIO_DATA_CAPTURE_UART) && defined (RT_USING_FINSH)
@@ -571,7 +595,9 @@ static void inline speaker_update_volume(audio_device_speaker_t *my, int16_t spf
         {
             if (my->last_volume != volx2)
             {
-                LOG_I("eq change volume=%d", volx2);
+                /* This function runs from the audio DMA ISR. Console logging
+                 * can recursively acquire the UART/ulog lock held by the
+                 * interrupted thread and deadlock the whole system. */
                 rt_device_control(my->audcodec_dev, AUDIO_CTL_SETVOLUME, (void *)volx2);
             }
             my->is_eq_mute_volume = 0;
@@ -581,16 +607,6 @@ static void inline speaker_update_volume(audio_device_speaker_t *my, int16_t spf
     }
     else
     {
-        static uint16_t debug_volume = 0;
-        if (debug_volume == 0)
-        {
-            LOG_I("server volume=%d, mute=%d eq_mute=%d",
-                  vol,
-                  g_server.public_is_tx_mute,
-                  my->is_eq_mute_volume);
-        }
-        debug_volume++;
-
         if (g_server.public_is_tx_mute)
         {
             memset(spframe, 0, len * 2);
@@ -670,7 +686,7 @@ static void inline speaker_update_volume(audio_device_speaker_t *my, int16_t spf
             {
                 if (my->last_volume != volx2)
                 {
-                    LOG_I("not eq change volume=%d", volx2);
+                    /* Keep the DMA ISR free of console output. */
                     rt_device_control(my->audcodec_dev, AUDIO_CTL_SETVOLUME, (void *)volx2);
                 }
                 my->is_eq_mute_volume = 0;
@@ -744,10 +760,21 @@ static inline void process_speaker_tx(audio_server_t *server, audio_device_speak
     uint8_t is_suspended;
     uint8_t has_callback;
 
-    audio_client_t first = device_get_tx_in_running(my->parent, 0);
+    audio_client_t first;
+
+    if (0U != g_ucAudioDiagnosticTrackFirstTxIrq)
+    {
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_TX_IRQ_ENTER);
+    }
+    first = device_get_tx_in_running(my->parent, 0);
     if ((my->opened_map_flag & OPEN_MAP_TX) == 0 || !my->tx_ref || !first)
     {
         //LOG_I("invlide tx ref=%d map=%d first=%p", my->tx_ref, (my->opened_map_flag & OPEN_MAP_TX), first);
+        if (0U != g_ucAudioDiagnosticTrackFirstTxIrq)
+        {
+            AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_TX_IRQ_EXIT);
+            g_ucAudioDiagnosticTrackFirstTxIrq = 0U;
+        }
         return;
     }
     is_suspended = first->is_suspended;
@@ -799,7 +826,15 @@ static inline void process_speaker_tx(audio_server_t *server, audio_device_speak
 #if defined(AUDIO_TX_USING_I2S)
             bf0_i2s_device_write(my->i2s, 0, my->tx_data_tmp, my->tx_dma_size);
 #else
+            if (0U != g_ucAudioDiagnosticTrackFirstTxIrq)
+            {
+                AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_TX_BUFFER_BEGIN);
+            }
             bf0_audprc_device_write(my->audprc_dev, 0, my->tx_data_tmp, my->tx_dma_size);
+            if (0U != g_ucAudioDiagnosticTrackFirstTxIrq)
+            {
+                AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_TX_BUFFER_DONE);
+            }
 #endif
             my->tx_empty_cnt++;
             if (!is_suspended && g_ae_log)
@@ -859,6 +894,11 @@ static inline void process_speaker_tx(audio_server_t *server, audio_device_speak
             }
         }
 #endif
+    }
+    if (0U != g_ucAudioDiagnosticTrackFirstTxIrq)
+    {
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_TX_IRQ_EXIT);
+        g_ucAudioDiagnosticTrackFirstTxIrq = 0U;
     }
 }
 
@@ -1215,7 +1255,9 @@ static void config_tx(audio_device_speaker_t *my, audio_client_t client)
             volumex2 = eq_get_tel_volumex2(vol_level);
 
         LOG_I("no eq init volume=%d", volumex2);
-        my->last_volume = MUTE_UNDER_MIN_VOLUME;
+        my->last_volume = volumex2;
+        my->is_eq_mute_volume =
+            (MUTE_UNDER_MIN_VOLUME == volumex2) ? 1U : 0U;
         rt_device_control(my->audcodec_dev, AUDIO_CTL_SETVOLUME, (void *)volumex2);
     }
 #endif
@@ -1297,7 +1339,9 @@ static void config_rx(audio_device_speaker_t *my)
 static void start_rx(audio_device_speaker_t *my)
 {
     int stream;
-    LOG_I("%s need_adc_rx=%d", __FUNCTION__, my->need_adc_rx);
+
+    /* Called from the first TX DMA interrupt. Logging here can recursively
+     * take the UART/ulog lock held by the preempted audio-server thread. */
     if (my->need_adc_rx)
     {
         my->need_adc_rx = 0;
@@ -1463,10 +1507,14 @@ static int audio_device_speaker_open(void *user_data, audio_device_input_callbac
 {
     int stream;
     uint8_t need_tx_init = 0, need_rx_init = 0;
+    uint8_t pa_started = 0;
     rt_err_t err;
     audio_device_ctrl_t *device = (audio_device_ctrl_t *)user_data;
     audio_server_t *server = get_server();
     audio_client_t client = device->opening_client;
+
+    g_ucAudioDiagnosticTrackFirstTxIrq = 1U;
+    AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_SPEAKER_OPEN_BEGIN);
 
     RT_ASSERT(client);
     RT_ASSERT(device == &server->devices_ctrl[AUDIO_DEVICE_SPEAKER]);
@@ -1615,17 +1663,31 @@ static int audio_device_speaker_open(void *user_data, audio_device_input_callbac
         }
         //6. DAC mute
         rt_device_control(my->audcodec_dev, AUDIO_CTL_MUTE, (void *)1);
-        //7 DAC start
+        //7. Enable and stabilize the PA before TX DMA can request empty data.
+        LOG_I("open PA before TX start");
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_PA_START_BEGIN);
+        audio_hardware_pa_start(my->tx_samplerate, 0);
+        pa_started = 1;
+        /* Make the first DMA half-transfer callback valid before enabling DMA.
+         * At 44.1 kHz the first half completes in about 9 ms, earlier than the
+         * former 10 ms post-start delay. */
+        my->opened_map_flag |= OPEN_MAP_TX;
+        /* TX-only playback has no deferred RX start. Keep the DMA ISR out of
+         * start_rx(), whose state machine is reserved for TX/RX sessions. */
+        my->tx_ready = 2U;
+        //8. DAC start
         stream = AUDIO_STREAM_REPLAY | ((1 << HAL_AUDPRC_TX_CH0) << 8);
         LOG_I("speaker START stream=0x%x", stream);
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_AUDPRC_START_BEGIN);
         rt_device_control(my->audprc_dev, AUDIO_CTL_START, (void *)&stream);
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_AUDPRC_START_DONE);
         stream = AUDIO_STREAM_REPLAY | ((1 << HAL_AUDCODEC_DAC_CH0) << 8);
         LOG_I("codec START stream=0x%x", stream);
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_CODEC_START_BEGIN);
         rt_device_control(my->audcodec_dev, AUDIO_CTL_START, &stream);
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_CODEC_START_DONE);
         rt_thread_mdelay(10);
 #endif
-        my->opened_map_flag |= OPEN_MAP_TX;
-        my->tx_ready = 1;
     }
     else if (!need_tx_init && need_rx_init) // rx only
     {
@@ -1638,12 +1700,17 @@ static int audio_device_speaker_open(void *user_data, audio_device_input_callbac
     {
         start_txrx(my);
     }
-    //7. open PA, DAC unmute
+    //9. Open PA if it was not stabilized above, then unmute DAC.
     if (need_tx_init)
     {
         LOG_I("open PA, unmute DAC");
-        audio_hardware_pa_start(my->tx_samplerate, 0);
+        if (!pa_started)
+        {
+            AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_PA_START_BEGIN);
+            audio_hardware_pa_start(my->tx_samplerate, 0);
+        }
 #if !defined(AUDIO_TX_USING_I2S)
+        AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_DAC_UNMUTE_BEGIN);
         rt_device_control(my->audcodec_dev, AUDIO_CTL_MUTE, (void *)0);
 #endif
     }
@@ -1657,6 +1724,7 @@ static int audio_device_speaker_open(void *user_data, audio_device_input_callbac
         server->is_bt_3a = 1;
     }
 Exit:
+    AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_SPEAKER_OPEN_DONE);
     LOG_I("%s out", __FUNCTION__);
     return 0;
 }

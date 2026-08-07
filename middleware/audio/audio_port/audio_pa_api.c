@@ -15,6 +15,12 @@
 
 #define WAIT_PA_STABLE_TIME_MS      100
 
+#define AUDIO_DIAG_PHASE_PA_GPIO_DONE (0xA116U)
+#define AUDIO_DIAG_PHASE_PA_WAIT_BEGIN (0xA117U)
+#define AUDIO_DIAG_PHASE_PA_WAIT_DONE (0xA118U)
+
+extern void AUDIODIAG_ServerStageHook(uint16_t usPhase);
+
 /* some board stop PA has pop noise, need delay some time than close DAC*/
 #define PA_CLOSE_DELAY_MS           10
 
@@ -52,7 +58,10 @@ void audio_hardware_pa_start(uint32_t samplerate, uint32_t reserved)
     (void)samplerate;
     (void)reserved;
     sifli_aw8155_start();
+    AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_PA_GPIO_DONE);
+    AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_PA_WAIT_BEGIN);
     rt_thread_mdelay(WAIT_PA_STABLE_TIME_MS);
+    AUDIODIAG_ServerStageHook(AUDIO_DIAG_PHASE_PA_WAIT_DONE);
 }
 void audio_hardware_pa_stop(void)
 {
