@@ -1,0 +1,28 @@
+middleware/audio/audio_port/audio_pa_api.c
+  s_285146986cdcdb::t_084d1c04de498f 18-22,61-62,64
+  s_285146986cdcdb::t_e89f6e911a70ec 23
+middleware/audio/audio_manager/audio_server.c
+  s_285146986cdcdb::t_e89f6e911a70ec 141,1518
+  s_285146986cdcdb::t_084d1c04de498f 118-125,130,135-140,1510,1517,1666-1670,1678,1681,1683,1686,1688,1703,1707-1711,1713,1727
+  s_285146986cdcdb::t_45d61f4aa708e7 598-600,689
+  s_285146986cdcdb::t_e2b7ae631eaf3c 126-129,133-134,763-769,773-777,829-832,834-837,898-902,1516,1671-1674
+  s_285146986cdcdb::t_cfcb6b235eb495 131-132
+  s_285146986cdcdb::t_4653a3d3b0b5f0 1258-1260
+  s_285146986cdcdb::t_626f75b20735cf 1342-1344,1675-1677
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "f41ce6fb27fbda6ce726fc29ad2bf4bbd2469bb5",
+  "prompts": {},
+  "sessions": {
+    "s_285146986cdcdb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd167-97e3-7830-af9f-4e8a198f25b3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "qinmenghuai <qinmenghuai@wondertechlabs.com>"
+    }
+  }
+}
