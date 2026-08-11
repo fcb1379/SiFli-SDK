@@ -1424,8 +1424,11 @@ static rt_err_t bf0_audio_stop(struct rt_audio_device *audio, int stream)
         if ((haudcodec->channel_ref & adc_mask) == 0)
         {
             LOG_I("audcodec close adc");
-            __HAL_AUDCODEC_ADC_DISABLE(haudcodec);
+            /* Keep the ADC register clock available while shutting down the
+             * analog path.  Disabling the digital ADC first can make the
+             * following analog-register access stall on SF32LB52. */
             HAL_AUDCODEC_Close_Analog_ADCPath();
+            __HAL_AUDCODEC_ADC_DISABLE(haudcodec);
             HAL_AUDCODEC_Clear_All_Channel(haudcodec, 2);
         }
         else

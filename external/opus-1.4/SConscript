@@ -19,7 +19,12 @@ SrcRemove(src, ['./src/opus_demo.c', './src/repacketizer_demo.c', './src/opus_co
 if GetDepend(['BF0_ACPU']):
     SrcRemove(src, ['./src/opus_test.c'])
 
-CPPDEFINES = ['HAVE_LRINTF', 'HAVE_ALLOCA_H', 'USE_ALLOCA', 'OPUS_BUILD', 'FIXED_POINT', 'DISABLE_FLOAT_API']
+# The media player's audio decode thread only has an 8 KiB stack, while an
+# Opus 120 ms frame needs more than 23 KiB for the outer multistream scratch
+# buffer alone.  Use Opus' bounded pseudo-stack so temporary codec storage is
+# provided by opus_alloc_scratch() and can live in the application's media
+# memory pool instead of overflowing the RT-Thread stack.
+CPPDEFINES = ['HAVE_LRINTF', 'NONTHREADSAFE_PSEUDOSTACK', 'OPUS_BUILD', 'FIXED_POINT', 'DISABLE_FLOAT_API']
 
 #LOCAL_CCFLAGS = ' -Wno-error -Wno-#warnings -O3'
 #LOCAL_CCFLAGS = ' -Wno-error -Wno-#warnings -Ofast'

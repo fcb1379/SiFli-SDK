@@ -163,6 +163,13 @@ typedef int (*audio_server_callback_func)(audio_server_callback_cmt_t cmd, void 
 
 audio_client_t audio_open(audio_type_t audio_type, audio_rwflag_t rwflag, audio_parameter_t *paramter, audio_server_callback_func callback, void *callback_userdata);
 audio_client_t audio_open2(audio_type_t audio_type, audio_rwflag_t rwflag, audio_parameter_t *paramter, audio_server_callback_func callback, void *callback_userdata, audio_device_e fixed_device);
+audio_client_t AUDIO_OpenWithCache(audio_type_t eAudioType,
+                                   audio_rwflag_t eRwFlag,
+                                   audio_parameter_t *pParameter,
+                                   audio_server_callback_func pCallback,
+                                   void *pCallbackContext,
+                                   uint8_t *pRingMemory,
+                                   uint32_t ulRingMemoryBytes);
 
 /**
   * @brief  write pcm data to cache

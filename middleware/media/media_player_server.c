@@ -18,6 +18,7 @@
 #define NETWORK_READ_STACK_SIZE (13 * 1024)
 #define FFMPEG_OPEN_AYNC        1
 #define refcount                1
+#define MEDIA_AUDIO_MAX_SAMPLE_RATE (192000U)
 
 #define SIFLI_MEDIA_MAGIC1      "siflizip"
 #define SIFLI_MEDIA_MAGIC2      "siflizi2"
@@ -36,13 +37,16 @@ uint32_t ffmpeg_thread_stack[4 * 1024]; //video & audio stack
 #define ffmpeg_audio_dec_thread_stack   &ffmpeg_thread_stack[0]
 #define ffmpeg_video_dec_thread_stack   &ffmpeg_thread_stack[ffmpeg_audio_dec_thread_stack_size/4]
 
+static struct rt_thread ffmpeg_read_thread_control;
+static uint32_t ffmpeg_read_thread_stack[8192U / sizeof(uint32_t)];
+
 #define EVT_INIT_OK         (1<<0)
 #define EVT_INIT_FAILED     (1<<1)
 
 static ffmpeg_handle g_player = NULL;
 
 static void drop_all_avpacket(os_message_queue_t q);
-static void clean_up(ffmpeg_handle thiz);
+static void clean_up(ffmpeg_handle thiz, bool free_context);
 RT_WEAK uint32_t lv_img_decode_flash_read(uint32_t addr, uint8_t *buf, int size)
 {
     RT_ASSERT(0);
@@ -154,6 +158,7 @@ static void video_period_handle(void *p)
 static void video_decode_thread(void *p)
 {
     int got_frame = 0;
+    rt_err_t message_result;
     AVPacket                pkt;
     ffmpeg_handle thiz = p;
     rt_time_t  timer = RT_NULL;
@@ -170,9 +175,26 @@ static void video_decode_thread(void *p)
             }
         }
 
-        os_message_get(thiz->av_pkt_queue, &pkt, sizeof(pkt), OS_WAIT_FORVER);
+        message_result = os_message_get(thiz->av_pkt_queue,
+                                        &pkt,
+                                        sizeof(pkt),
+                                        OS_WAIT_FORVER);
+        if (RT_EOK != message_result)
+        {
+            if (!thiz->is_ok)
+            {
+                break;
+            }
+            continue;
+        }
 
         AVPacket orig_pkt = pkt;
+
+        if ((NULL == pkt.data) && (0 == pkt.size))
+        {
+            av_packet_unref(&orig_pkt);
+            break;
+        }
 
         do
         {
@@ -259,6 +281,16 @@ static int audio_callback_func(audio_server_callback_cmt_t cmd, void *callback_u
     return 0;
 }
 
+static void audio_decode_fail(ffmpeg_handle thiz, const char *reason)
+{
+    LOG_E("audio playback stopped: %s", reason);
+    thiz->is_ok = 0;
+    if (thiz->cfg.notify && !thiz->is_closing)
+    {
+        thiz->cfg.notify(thiz->user_data, e_ffmpeg_play_to_error, 0);
+    }
+}
+
 static void decode_audio_packet(ffmpeg_handle thiz, AVPacket *orig, AVPacket *cur_pkt)
 {
     int got_frame;
@@ -277,9 +309,28 @@ static void decode_audio_packet(ffmpeg_handle thiz, AVPacket *orig, AVPacket *cu
         }
         if (got_frame)
         {
+            uint32_t new_size;
+
+            if ((0 >= thiz->audio_frame->nb_samples) ||
+                    (0 >= thiz->audio_frame->channels) ||
+                    (2 < thiz->audio_frame->channels) ||
+                    ((UINT32_MAX / (sizeof(uint16_t) *
+                                    (uint32_t)thiz->audio_frame->channels)) <
+                     (uint32_t)thiz->audio_frame->nb_samples))
+            {
+                audio_decode_fail(thiz, "invalid decoded PCM geometry");
+                if (refcount)
+                {
+                    av_frame_unref(thiz->audio_frame);
+                }
+                break;
+            }
+            new_size = (uint32_t)thiz->audio_frame->nb_samples *
+                       (uint32_t)thiz->audio_frame->channels *
+                       sizeof(uint16_t);
             if (thiz->audio_data == NULL)
             {
-                thiz->audio_data_size = (thiz->audio_frame->nb_samples * thiz->audio_frame->channels * sizeof(uint16_t));
+                thiz->audio_data_size = new_size;
 
                 if (thiz->audio_data_size < 1152 * 4)
                 {
@@ -287,7 +338,15 @@ static void decode_audio_packet(ffmpeg_handle thiz, AVPacket *orig, AVPacket *cu
                 }
 
                 thiz->audio_data = (uint16_t *)thiz->cfg.mem_malloc(thiz->audio_data_size);
-                RT_ASSERT(thiz->audio_data != NULL);
+                if (NULL == thiz->audio_data)
+                {
+                    audio_decode_fail(thiz, "PCM frame allocation failed");
+                    if (refcount)
+                    {
+                        av_frame_unref(thiz->audio_frame);
+                    }
+                    break;
+                }
             }
             if (thiz->audio_handle == NULL)
             {
@@ -299,19 +358,44 @@ static void decode_audio_packet(ffmpeg_handle thiz, AVPacket *orig, AVPacket *cu
                 thiz->audio_data_period = thiz->audio_data_size / (thiz->audio_samplerate * thiz->audio_frame->channels * (arg.write_bits_per_sample >> 3) / 1000);
                 LOG_I("audio_frame_size=%d, sr=%d", thiz->audio_data_size, thiz->audio_samplerate);
                 LOG_I("audio_data_period=%d", thiz->audio_data_period);
-                thiz->audio_handle = audio_open(AUDIO_TYPE_LOCAL_MUSIC, AUDIO_TX, &arg, audio_callback_func, thiz);
-                RT_ASSERT(thiz->audio_handle);
+                thiz->audio_handle = AUDIO_OpenWithCache(
+                                         AUDIO_TYPE_LOCAL_MUSIC,
+                                         AUDIO_TX,
+                                         &arg,
+                                         audio_callback_func,
+                                         thiz,
+                                         thiz->cfg.audio_ring_buffer,
+                                         thiz->cfg.audio_ring_buffer_size);
+                if (NULL == thiz->audio_handle)
+                {
+                    audio_decode_fail(thiz, "audio output open failed");
+                    if (refcount)
+                    {
+                        av_frame_unref(thiz->audio_frame);
+                    }
+                    break;
+                }
             }
 
-            uint32_t new_size = thiz->audio_frame->nb_samples * thiz->audio_frame->channels * sizeof(uint16_t);
             thiz->audio_data_period = new_size / (thiz->audio_samplerate * thiz->audio_frame->channels * 2 / 1000);
 
             if (new_size > thiz->audio_data_size)
             {
+                uint16_t *new_audio_data;
+
+                new_audio_data = (uint16_t *)thiz->cfg.mem_malloc(new_size);
+                if (NULL == new_audio_data)
+                {
+                    audio_decode_fail(thiz, "PCM frame growth failed");
+                    if (refcount)
+                    {
+                        av_frame_unref(thiz->audio_frame);
+                    }
+                    break;
+                }
                 thiz->cfg.mem_free(thiz->audio_data);
+                thiz->audio_data = new_audio_data;
                 thiz->audio_data_size = new_size;
-                thiz->audio_data = (uint16_t *)thiz->cfg.mem_malloc(new_size);
-                RT_ASSERT(thiz->audio_data != NULL);
             }
 
             TRACE_MARK_START(TRACEID_AUDIO_CONVERT);
@@ -347,6 +431,7 @@ static void decode_audio_packet(ffmpeg_handle thiz, AVPacket *orig, AVPacket *cu
 static void audio_decode_thread(void *p)
 {
     int got_frame;
+    rt_err_t message_result;
     AVPacket                pkt;
     ffmpeg_handle thiz = p;
     LOG_I("audio decode task run\n");
@@ -363,9 +448,27 @@ static void audio_decode_thread(void *p)
                 thiz->audio_handle = NULL;
             }
         }
-        os_message_get(thiz->av_pkt_queue_audio, &pkt, sizeof(pkt), OS_WAIT_FORVER);
+        message_result = os_message_get(thiz->av_pkt_queue_audio,
+                                        &pkt,
+                                        sizeof(pkt),
+                                        OS_WAIT_FORVER);
+        if (RT_EOK != message_result)
+        {
+            if (!thiz->is_ok)
+            {
+                break;
+            }
+            continue;
+        }
 
         AVPacket orig_pkt = pkt;
+
+        /* A zero-length packet is the read thread's end-of-stream sentinel. */
+        if ((NULL == pkt.data) && (0 == pkt.size))
+        {
+            av_packet_unref(&orig_pkt);
+            break;
+        }
 
         if (thiz->is_paused || thiz->is_suspended)
         {
@@ -405,6 +508,7 @@ static void audio_decode_thread(void *p)
 static void video_audio_decode_thread(void *p)
 {
     int got_frame = 0;
+    rt_err_t message_result;
     AVPacket pkt;
     ffmpeg_handle thiz = p;
     rt_time_t  timer = RT_NULL;
@@ -423,9 +527,26 @@ static void video_audio_decode_thread(void *p)
             }
         }
 
-        os_message_get(thiz->av_pkt_queue, &pkt, sizeof(pkt), OS_WAIT_FORVER);
+        message_result = os_message_get(thiz->av_pkt_queue,
+                                        &pkt,
+                                        sizeof(pkt),
+                                        OS_WAIT_FORVER);
+        if (RT_EOK != message_result)
+        {
+            if (!thiz->is_ok)
+            {
+                break;
+            }
+            continue;
+        }
 
         AVPacket orig_pkt = pkt;
+
+        if ((NULL == pkt.data) && (0 == pkt.size))
+        {
+            av_packet_unref(&orig_pkt);
+            break;
+        }
 
         if (thiz->is_paused || thiz->is_suspended)
         {
@@ -564,6 +685,39 @@ static void media_read_thread(void *p)
         if (thiz->seeking_state == 1)
         {
             LOG_I("seek to %d", thiz->seek_to_second);
+            if ((0 > thiz->video_stream_idx) &&
+                    (0 <= thiz->audio_stream_idx))
+            {
+                AVStream *audio_stream =
+                    thiz->fmt_ctx->streams[thiz->audio_stream_idx];
+                AVRational seconds_time_base = {1, 1};
+                int64_t target_timestamp = av_rescale_q(
+                                               thiz->seek_to_second,
+                                               seconds_time_base,
+                                               audio_stream->time_base);
+
+                read_ret = av_seek_frame(thiz->fmt_ctx,
+                                         thiz->audio_stream_idx,
+                                         target_timestamp,
+                                         AVSEEK_FLAG_BACKWARD);
+                if (0 > read_ret)
+                {
+                    LOG_I("audio seek error=%d", read_ret);
+                }
+                else if (thiz->audio_dec_ctx)
+                {
+                    avcodec_flush_buffers(thiz->audio_dec_ctx);
+                }
+                thiz->seeking_state = 0;
+                thiz->last_seconds = thiz->seek_to_second;
+                if (thiz->cfg.notify && !thiz->is_closing)
+                {
+                    thiz->cfg.notify(thiz->user_data,
+                                     e_ffmpeg_progress,
+                                     thiz->seek_to_second);
+                }
+                continue;
+            }
             av_seek_frame(thiz->fmt_ctx, 0, 0, AVSEEK_FLAG_BACKWARD);
             thiz->frame_index = 0;
             while (thiz->seeking_state == 1)
@@ -656,8 +810,8 @@ static void media_read_thread(void *p)
         }
 #endif /*DEBUG_IO_SPEED*/
 
-        os_message_queue_t q;
-        uint32_t   trace_id;
+        os_message_queue_t q = NULL;
+        uint32_t   trace_id = 0;
         if (thiz->is_network_file)
         {
             q = thiz->av_pkt_queue;
@@ -685,9 +839,42 @@ static void media_read_thread(void *p)
             {
                 q = thiz->av_pkt_queue_audio;
                 trace_id = TRACEID_AUDIO_PACKET;
+                if (thiz->cfg.notify && !thiz->is_closing)
+                {
+                    int64_t timestamp = (AV_NOPTS_VALUE != pkt.pts) ?
+                                        pkt.pts : pkt.dts;
+
+                    if (AV_NOPTS_VALUE != timestamp)
+                    {
+                        AVStream *audio_stream =
+                            thiz->fmt_ctx->streams[thiz->audio_stream_idx];
+                        AVRational seconds_time_base = {1, 1};
+                        int64_t seconds = av_rescale_q(timestamp,
+                                                       audio_stream->time_base,
+                                                       seconds_time_base);
+
+                        if ((0 <= seconds) &&
+                                ((uint32_t)seconds != thiz->last_seconds))
+                        {
+                            thiz->last_seconds = (uint32_t)seconds;
+                            thiz->cfg.notify(thiz->user_data,
+                                             e_ffmpeg_progress,
+                                             (uint32_t)seconds);
+                        }
+                    }
+                }
             }
             else
-                RT_ASSERT(0);
+            {
+                LOG_W("drop unsupported stream index=%d", pkt.stream_index);
+                av_packet_unref(&pkt);
+                continue;
+            }
+        }
+        if (!q)
+        {
+            av_packet_unref(&pkt);
+            continue;
         }
 
         TRACE_MARK_START(trace_id);
@@ -722,20 +909,52 @@ static void media_read_thread(void *p)
     pkt.data = NULL;
     pkt.size = 0;
 
+    bool audio_exit_packet_queued = false;
+    uint32_t audio_exit_wait_count = 0U;
     while (rt_thread_find("aud_dec"))
     {
-        os_message_put(thiz->av_pkt_queue_audio, &pkt, sizeof(pkt), 0);
+        if ((!audio_exit_packet_queued) &&
+                (RT_EOK == os_message_put(thiz->av_pkt_queue_audio,
+                                          &pkt,
+                                          sizeof(pkt),
+                                          0)))
+        {
+            audio_exit_packet_queued = true;
+        }
         if (thiz->evt_audio)   os_event_flags_set(thiz->evt_audio, 1);
         rt_thread_mdelay(10);
-        LOG_I("wait audio dec thread exit");
+        audio_exit_wait_count++;
+        if ((1U == audio_exit_wait_count) ||
+                (0U == (audio_exit_wait_count % 100U)))
+        {
+            LOG_I("wait audio dec thread exit queued=%d count=%lu",
+                  audio_exit_packet_queued,
+                  (unsigned long)audio_exit_wait_count);
+        }
     }
 
+    bool video_exit_packet_queued = false;
+    uint32_t video_exit_wait_count = 0U;
     while (rt_thread_find("vid_dec"))
     {
-        os_message_put(thiz->av_pkt_queue, &pkt, sizeof(pkt), 0);
+        if ((!video_exit_packet_queued) &&
+                (RT_EOK == os_message_put(thiz->av_pkt_queue,
+                                          &pkt,
+                                          sizeof(pkt),
+                                          0)))
+        {
+            video_exit_packet_queued = true;
+        }
         if (thiz->evt_video)  os_event_flags_set(thiz->evt_video, 1);
         rt_thread_mdelay(10);
-        LOG_I("wait video dec thread exit");
+        video_exit_wait_count++;
+        if ((1U == video_exit_wait_count) ||
+                (0U == (video_exit_wait_count % 100U)))
+        {
+            LOG_I("wait video dec thread exit queued=%d count=%lu",
+                  video_exit_packet_queued,
+                  (unsigned long)video_exit_wait_count);
+        }
     }
 
     if (thiz->av_pkt_queue)
@@ -748,7 +967,7 @@ static void media_read_thread(void *p)
         drop_all_avpacket(thiz->av_pkt_queue_audio);
     }
 
-    clean_up(thiz);
+    clean_up(thiz, true);
 
     LOG_I("media exit");
 }
@@ -761,7 +980,7 @@ static void drop_all_avpacket(os_message_queue_t q)
 
 }
 
-static void clean_up(ffmpeg_handle thiz)
+static void clean_up(ffmpeg_handle thiz, bool free_context)
 {
     if (thiz->evt_video)
     {
@@ -840,11 +1059,12 @@ static void clean_up(ffmpeg_handle thiz)
 
     media_cache_deinit(&thiz->video_cache, VIDEO_BUFFER_CAPACITY);
 
-    rt_free(thiz);
-
-    ffmpeg_memleak_check();
-
-    g_player = NULL;
+    if (free_context)
+    {
+        thiz->cfg.mem_free(thiz);
+        ffmpeg_memleak_check();
+        g_player = NULL;
+    }
 }
 
 static int read_packet(void *opaque, uint8_t *buf, int buf_size)
@@ -886,14 +1106,40 @@ static int read_packet(void *opaque, uint8_t *buf, int buf_size)
 
 static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
 {
-    os_event_create(thiz->evt_audio);
-    os_event_create(thiz->evt_video);
     os_event_create(thiz->evt_pause);
-    os_event_create(thiz->evt_video_decode);
+    if (!thiz->evt_pause)
+    {
+        LOG_E("pause event no mem");
+        goto Exit;
+    }
+    if (thiz->cfg.audio_enable)
+    {
+        os_event_create(thiz->evt_audio);
+        if (!thiz->evt_audio)
+        {
+            LOG_E("audio event no mem");
+            goto Exit;
+        }
+    }
+    if (thiz->cfg.video_enable)
+    {
+        os_event_create(thiz->evt_video);
+        os_event_create(thiz->evt_video_decode);
+        if (!thiz->evt_video || !thiz->evt_video_decode)
+        {
+            LOG_E("video event no mem");
+            goto Exit;
+        }
+    }
 
     av_register_all();
 
-    media_cache_init(&thiz->video_cache, VIDEO_BUFFER_CAPACITY);
+    if (thiz->cfg.video_enable &&
+            RT_EOK != media_cache_init(&thiz->video_cache,
+                                       VIDEO_BUFFER_CAPACITY))
+    {
+        goto Exit;
+    }
 
     if (is_file)
     {
@@ -956,6 +1202,13 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         LOG_E("find stream information\n");
         goto Exit;
     }
+    if ((0 < thiz->fmt_ctx->duration) &&
+            (UINT32_MAX >=
+             ((uint64_t)thiz->fmt_ctx->duration / AV_TIME_BASE)))
+    {
+        thiz->total_time_in_seconds =
+            (uint32_t)((uint64_t)thiz->fmt_ctx->duration / AV_TIME_BASE);
+    }
 
     //  Rewind to the start
     if (is_file && !thiz->is_network_file)
@@ -971,8 +1224,14 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         LOG_I("unsupport codec=%d", thiz->fmt_ctx->streams[i]->codec->codec_type);
     }
 
+    thiz->video_stream_idx = -1;
+    thiz->audio_stream_idx = -1;
+
     // Get video parameters
-    if (open_codec_context(&thiz->video_stream_idx, thiz->fmt_ctx, AVMEDIA_TYPE_VIDEO) >= 0)
+    if (thiz->cfg.video_enable &&
+            open_codec_context(&thiz->video_stream_idx,
+                               thiz->fmt_ctx,
+                               AVMEDIA_TYPE_VIDEO) >= 0)
     {
         AVStream *video_stream = thiz->fmt_ctx->streams[thiz->video_stream_idx];
         thiz->video_dec_ctx = video_stream->codec;
@@ -1006,7 +1265,6 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
             thiz->period = 40;
             thiz->period_float = 40.0f;
         }
-        thiz->total_time_in_seconds = thiz->fmt_ctx->duration;
         char *name = avcodec_get_name(thiz->video_dec_ctx->codec_id);
 
         thiz->gpu_pic_fmt = e_sifli_fmt_yuv420p;
@@ -1020,26 +1278,45 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         }
         LOG_I("video codec: %s stream w=%d h=%d,period=%ld", name, thiz->width, thiz->height, thiz->period);
     }
-    else
+    else if (thiz->cfg.video_enable)
         LOG_E("cannot find video stream\n");
 
     // Get Audio parameters
-    if (open_codec_context(&thiz->audio_stream_idx, thiz->fmt_ctx, AVMEDIA_TYPE_AUDIO) >= 0)
+    if (thiz->cfg.audio_enable &&
+            open_codec_context(&thiz->audio_stream_idx,
+                               thiz->fmt_ctx,
+                               AVMEDIA_TYPE_AUDIO) >= 0)
     {
         AVStream *audio_stream = thiz->fmt_ctx->streams[thiz->audio_stream_idx];
         thiz->audio_dec_ctx = audio_stream->codec;
         thiz->audio_channel = thiz->audio_dec_ctx->channels;
         thiz->audio_samplerate = thiz->audio_dec_ctx->sample_rate;
+        if ((0U == thiz->audio_samplerate) ||
+                (MEDIA_AUDIO_MAX_SAMPLE_RATE < thiz->audio_samplerate) ||
+                (0U == thiz->audio_channel) ||
+                (2U < thiz->audio_channel))
+        {
+            LOG_E("invalid audio stream sample_rate=%lu channels=%lu",
+                  (unsigned long)thiz->audio_samplerate,
+                  (unsigned long)thiz->audio_channel);
+            goto Exit;
+        }
         LOG_I("audio codec: fmt=%d", thiz->audio_dec_ctx->sample_fmt);
     }
-    else
-        LOG_E("cannot find audio stream\n");
-
-    thiz->audio_frame = av_frame_alloc();
-    if (!thiz->audio_frame)
+    else if (thiz->cfg.audio_enable)
     {
-        LOG_E("Could not allocate audio frame\n");
+        LOG_E("cannot find audio stream\n");
         goto Exit;
+    }
+
+    if (thiz->cfg.audio_enable)
+    {
+        thiz->audio_frame = av_frame_alloc();
+        if (!thiz->audio_frame)
+        {
+            LOG_E("Could not allocate audio frame\n");
+            goto Exit;
+        }
     }
     thiz->is_ok = 1;
 
@@ -1057,13 +1334,35 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
     }
     else
     {
-        // Initialize AV packet queue
-        thiz->av_pkt_queue = os_message_queue_create_int("avpkt", READ_BUFFER_CAPACITY, sizeof(AVPacket), NULL, 0);
-        RT_ASSERT(thiz->av_pkt_queue != NULL);
+        if (thiz->cfg.video_enable)
+        {
+            thiz->av_pkt_queue = os_message_queue_create_int(
+                                     "avpkt",
+                                     READ_BUFFER_CAPACITY,
+                                     sizeof(AVPacket),
+                                     NULL,
+                                     0);
+            if (!thiz->av_pkt_queue)
+            {
+                LOG_E("video packet queue no mem");
+                goto Exit;
+            }
+        }
 
-        // Start decode thread;
-        thiz->av_pkt_queue_audio = os_message_queue_create_int("aud_pkt", READ_BUFFER_CAPACITY, sizeof(AVPacket), NULL, 0);
-        RT_ASSERT(thiz->av_pkt_queue_audio != NULL);
+        if (thiz->cfg.audio_enable)
+        {
+            thiz->av_pkt_queue_audio = os_message_queue_create_int(
+                                           "aud_pkt",
+                                           READ_BUFFER_CAPACITY,
+                                           sizeof(AVPacket),
+                                           NULL,
+                                           0);
+            if (!thiz->av_pkt_queue_audio)
+            {
+                LOG_E("audio packet queue no mem");
+                goto Exit;
+            }
+        }
 
         if (thiz->cfg.audio_enable)
         {
@@ -1071,7 +1370,11 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
                                         ffmpeg_audio_dec_thread_stack, ffmpeg_audio_dec_thread_stack_size,
                                         audio_dec_task_prio,
                                         RT_THREAD_TICK_DEFAULT);
-            RT_ASSERT(thiz->audio_decode_thread != NULL);
+            if (NULL == thiz->audio_decode_thread)
+            {
+                LOG_E("audio decode thread no mem");
+                goto Exit;
+            }
         }
 
         if (thiz->cfg.video_enable)
@@ -1104,7 +1407,7 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
     LOG_I("mediaplayer_start ok");
     return RT_EOK;
 Exit:
-    clean_up(thiz);
+    clean_up(thiz, !FFMPEG_OPEN_AYNC);
     LOG_I("mediaplayer_start failed");
     return RT_EIO;
 }
@@ -1222,7 +1525,7 @@ static void ezip_clean_up(ffmpeg_handle thiz)
     ezip_audio_cache_deinit(thiz);
     ezip_video_cache_deinit(thiz);
 
-    rt_free(thiz);
+    thiz->cfg.mem_free(thiz);
 
     ffmpeg_memleak_check();
 
@@ -1581,7 +1884,8 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
     LOG_I("%s", __FUNCTION__);
     for (int i = 0; i < 20; i++)
     {
-        if (!g_player)
+        if ((!g_player) &&
+                (NULL == rt_thread_find("ffmpeg_read")))
         {
             break;
         }
@@ -1613,7 +1917,11 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
     }
 
     //make it not busy or busy
-    g_player = (ffmpeg_handle)rt_calloc(1, sizeof(ffmpeg_decoder_t));
+    g_player = (ffmpeg_handle)cfg->mem_malloc(sizeof(ffmpeg_decoder_t));
+    if (g_player)
+    {
+        memset(g_player, 0, sizeof(ffmpeg_decoder_t));
+    }
     thiz = g_player;
     *return_hanlde = thiz;
 
@@ -1648,7 +1956,15 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
 
 #if FFMPEG_OPEN_AYNC
     os_event_create(thiz->evt_init);
-    RT_ASSERT(thiz->evt_init);
+    if (NULL == thiz->evt_init)
+    {
+        LOG_E("media init event no mem");
+        thiz->magic = ~FFMPEG_HANDLE_MAGIC;
+        thiz->cfg.mem_free(thiz);
+        g_player = NULL;
+        *return_hanlde = NULL;
+        return -RT_ENOMEM;
+    }
 
     /* this API called in UI, can't call ffmpeg internal api, may dead lock:
        ffmpeg api-->av_malloc---->ffmpeg_alloc-->image_cache_alloc--->wait UI release ramfs.
@@ -1664,11 +1980,41 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
         priority = network_read_task_prio;
     }
 
-    thiz->av_pkt_read_thread = rt_thread_create("ffmpeg_read", media_read_thread, thiz,
-                               stack_size,
-                               priority,
-                               RT_THREAD_TICK_DEFAULT);
-    RT_ASSERT(thiz->av_pkt_read_thread != NULL);
+    if ((e_src_localfile == cfg->src) &&
+            (stack_size <= sizeof(ffmpeg_read_thread_stack)))
+    {
+        if (RT_EOK == rt_thread_init(&ffmpeg_read_thread_control,
+                                     "ffmpeg_read",
+                                     media_read_thread,
+                                     thiz,
+                                     ffmpeg_read_thread_stack,
+                                     sizeof(ffmpeg_read_thread_stack),
+                                     priority,
+                                     RT_THREAD_TICK_DEFAULT))
+        {
+            thiz->av_pkt_read_thread = &ffmpeg_read_thread_control;
+        }
+    }
+    else
+    {
+        thiz->av_pkt_read_thread = rt_thread_create("ffmpeg_read",
+                                   media_read_thread,
+                                   thiz,
+                                   stack_size,
+                                   priority,
+                                   RT_THREAD_TICK_DEFAULT);
+    }
+    if (NULL == thiz->av_pkt_read_thread)
+    {
+        LOG_E("media read thread no mem");
+        os_event_delete(thiz->evt_init);
+        thiz->evt_init = NULL;
+        thiz->magic = ~FFMPEG_HANDLE_MAGIC;
+        thiz->cfg.mem_free(thiz);
+        g_player = NULL;
+        *return_hanlde = NULL;
+        return -RT_ENOMEM;
+    }
     rt_thread_startup(thiz->av_pkt_read_thread);
 
     rt_uint32_t evt = 0;
@@ -1712,7 +2058,7 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
         if (g_player)
         {
             g_player->magic = ~FFMPEG_HANDLE_MAGIC;
-            rt_free(g_player);
+            g_player->cfg.mem_free(g_player);
             g_player = NULL;
         }
     }
@@ -1737,6 +2083,21 @@ void ffmpeg_close(ffmpeg_handle thiz)
 
     return;
 
+}
+
+bool ffmpeg_is_closed(ffmpeg_handle thiz)
+{
+    bool is_closed;
+
+    rt_enter_critical();
+    is_closed = ((NULL == g_player) || (g_player != thiz));
+    rt_exit_critical();
+    if (is_closed && (NULL != rt_thread_find("ffmpeg_read")))
+    {
+        is_closed = false;
+    }
+
+    return is_closed;
 }
 
 bool ffmpeg_is_video_available(ffmpeg_handle thiz)
@@ -2016,6 +2377,15 @@ void ffmpeg_seek(ffmpeg_handle thiz, uint32_t second)
             LOG_I("ffmpeg seeking");
         }
     }
+}
+uint32_t ffmpeg_get_duration(ffmpeg_handle thiz)
+{
+    if (!thiz || thiz->magic != FFMPEG_HANDLE_MAGIC)
+    {
+        return 0;
+    }
+
+    return thiz->total_time_in_seconds;
 }
 void ffmpeg_resume(ffmpeg_handle thiz)
 {

@@ -132,7 +132,11 @@ int media_audio_get(AVFrame *frame, uint16_t *audio_data, uint32_t audio_data_si
          * in these cases.
          * You should use libswresample or libavfilter to convert the frame
          * to packed data. */
-        if (frame->format == AV_SAMPLE_FMT_S16P)
+        if (frame->format == AV_SAMPLE_FMT_S16)
+        {
+            memcpy(audio_data, frame->extended_data[0], size);
+        }
+        else if (frame->format == AV_SAMPLE_FMT_S16P)
         {
             uint16_t *l = (uint16_t *)frame->extended_data[0];
             uint16_t *r = (uint16_t *)frame->extended_data[1];
@@ -149,7 +153,7 @@ int media_audio_get(AVFrame *frame, uint16_t *audio_data, uint32_t audio_data_si
                 memcpy(audio_data, l, frame->nb_samples * 2);
             }
         }
-        if (frame->format == AV_SAMPLE_FMT_S32P)
+        else if (frame->format == AV_SAMPLE_FMT_S32P)
         {
             int32_t *l = (int32_t *)frame->extended_data[0];
             int32_t *r = (int32_t *)frame->extended_data[1];

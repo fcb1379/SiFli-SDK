@@ -272,6 +272,8 @@ struct audio_client_base_t
     audio_parameter_t           parameter;
     struct rt_ringbuffer        ring_buf;
     uint8_t                     *ring_pool;
+    uint8_t                     ring_pool_external;
+    void                        *close_command;
 #if SOFTWARE_TX_MIX_ENABLE
     sifli_resample_t            *resample;
     int16_t                     resample_dst[TX_DMA_SIZE];
@@ -2782,7 +2784,10 @@ inline static void audio_client_stop(audio_client_t client)
         LOG_I("stop in suspendlist");
         rt_list_remove(&client->node);
         rt_ringbuffer_reset(&client->ring_buf);
-        audio_mem_free(client->ring_pool);
+        if (0U == client->ring_pool_external)
+        {
+            audio_mem_free(client->ring_pool);
+        }
         client->magic = 0;
         rt_event_send(client->api_event, 1);
         audio_mem_free(client);
@@ -2791,7 +2796,10 @@ inline static void audio_client_stop(audio_client_t client)
 
     audio_device_close(server, client);
 
-    audio_mem_free(client->ring_pool);
+    if (0U == client->ring_pool_external)
+    {
+        audio_mem_free(client->ring_pool);
+    }
     client->magic = 0;
     rt_event_send(client->api_event, 1);
 #if SOFTWARE_TX_MIX_ENABLE
@@ -3529,19 +3537,39 @@ int audio_server_init(void)
 
 INIT_ENV_EXPORT(audio_server_init); //must call after all audio_proc_create which use INIT_COMPONENT_EXPORT
 
-static audio_client_t audio_client_init(audio_type_t audio_type, audio_rwflag_t rwflag, audio_parameter_t *parameter, audio_server_callback_func callback, void *callback_userdata, audio_device_e device)
+static audio_client_t audio_client_init(audio_type_t audio_type,
+                                        audio_rwflag_t rwflag,
+                                        audio_parameter_t *parameter,
+                                        audio_server_callback_func callback,
+                                        void *callback_userdata,
+                                        audio_device_e device,
+                                        uint8_t *pRingMemory,
+                                        uint32_t ulRingMemoryBytes)
 {
     uint32_t tx_ring_size;
-    RT_ASSERT(parameter);
+
+    if ((NULL == parameter) || (AUDIO_TYPE_NUMBER <= audio_type))
+    {
+        LOG_E("audio_open invalid parameter");
+        return NULL;
+    }
     LOG_I("audio_open type=%d d=%d rw=%d tx cache=%d rx cache=%d", audio_type, device, rwflag, parameter->write_cache_size, parameter->read_cache_size);
 
-    RT_ASSERT(audio_type < AUDIO_TYPE_NUMBER);
     audio_client_t handle = audio_mem_calloc(1, sizeof(struct audio_client_base_t));
-    RT_ASSERT(handle);
+    if (NULL == handle)
+    {
+        LOG_E("audio client no mem");
+        return NULL;
+    }
     handle->device_specified = device;
     handle->device_using = AUDIO_DEVICE_NONE;
     handle->api_event = rt_event_create("audcli", RT_IPC_FLAG_FIFO);
-    RT_ASSERT(handle->api_event);
+    if (NULL == handle->api_event)
+    {
+        LOG_E("audio client event no mem");
+        audio_mem_free(handle);
+        return NULL;
+    }
     tx_ring_size = parameter->write_cache_size;
     if (audio_type == AUDIO_TYPE_BT_VOICE)
     {
@@ -3571,9 +3599,47 @@ static audio_client_t audio_client_init(audio_type_t audio_type, audio_rwflag_t 
     handle->user_data   = callback_userdata;
     handle->audio_type  = audio_type;
     handle->rw_flag     = rwflag;
-    handle->ring_pool   = audio_mem_calloc(1, tx_ring_size + RT_ALIGN_SIZE);
-    RT_ASSERT(handle->ring_pool);
+    if (NULL != pRingMemory)
+    {
+        if (ulRingMemoryBytes < (tx_ring_size + RT_ALIGN_SIZE))
+        {
+            LOG_E("external audio cache too small need=%d have=%d",
+                  tx_ring_size + RT_ALIGN_SIZE,
+                  ulRingMemoryBytes);
+            rt_event_delete(handle->api_event);
+            audio_mem_free(handle);
+            return NULL;
+        }
+        handle->ring_pool = pRingMemory;
+        handle->ring_pool_external = 1U;
+        rt_memset(handle->ring_pool, 0, tx_ring_size + RT_ALIGN_SIZE);
+    }
+    else
+    {
+        handle->ring_pool = audio_mem_calloc(1,
+                                             tx_ring_size + RT_ALIGN_SIZE);
+        if (NULL == handle->ring_pool)
+        {
+            LOG_E("audio ring no mem size=%d", tx_ring_size + RT_ALIGN_SIZE);
+            rt_event_delete(handle->api_event);
+            audio_mem_free(handle);
+            return NULL;
+        }
+    }
     rt_ringbuffer_init(&handle->ring_buf, handle->ring_pool, tx_ring_size);
+
+    handle->close_command = audio_mem_calloc(1, sizeof(audio_server_cmt_t));
+    if (NULL == handle->close_command)
+    {
+        LOG_E("audio close command reserve no mem");
+        if (0U == handle->ring_pool_external)
+        {
+            audio_mem_free(handle->ring_pool);
+        }
+        rt_event_delete(handle->api_event);
+        audio_mem_free(handle);
+        return NULL;
+    }
 
     //todo, if rxflag has RD flag, alloc record ring buffer, now BT use other way to record
 
@@ -3616,7 +3682,19 @@ static audio_client_t audio_client_init(audio_type_t audio_type, audio_rwflag_t 
     {
         memcpy(&handle->parameter, parameter, sizeof(audio_parameter_t));
         audio_server_cmt_t *cmd = audio_mem_calloc(1, sizeof(audio_server_cmt_t));
-        RT_ASSERT(cmd);
+        if (NULL == cmd)
+        {
+            LOG_E("audio open command no mem");
+            unlock();
+            if (0U == handle->ring_pool_external)
+            {
+                audio_mem_free(handle->ring_pool);
+            }
+            audio_mem_free(handle->close_command);
+            rt_event_delete(handle->api_event);
+            audio_mem_free(handle);
+            return NULL;
+        }
         cmd->cmd = AUDIO_CMD_OPEN;
         cmd->client = handle;
         rt_slist_append(&g_server.command_slist, &cmd->snode);
@@ -3635,6 +3713,11 @@ static audio_client_t audio_client_init(audio_type_t audio_type, audio_rwflag_t 
 AUDIO_API audio_client_t audio_open(audio_type_t audio_type, audio_rwflag_t rwflag, audio_parameter_t *parameter, audio_server_callback_func callback, void *callback_userdata)
 {
     audio_device_e device = AUDIO_DEVICE_AUTO;
+    if (NULL == parameter)
+    {
+        LOG_E("audio_open invalid parameter");
+        return NULL;
+    }
     if ((audio_type != AUDIO_TYPE_BT_VOICE) && ((rwflag & AUDIO_TXRX) == AUDIO_RX))
     {
         //auto record device only support mic device, pmd record should use audio_open2()
@@ -3647,7 +3730,14 @@ AUDIO_API audio_client_t audio_open(audio_type_t audio_type, audio_rwflag_t rwfl
         LOG_I("3a voice always use speaker");
     }
 
-    return audio_client_init(audio_type, rwflag, parameter, callback, callback_userdata, device);
+    return audio_client_init(audio_type,
+                             rwflag,
+                             parameter,
+                             callback,
+                             callback_userdata,
+                             device,
+                             NULL,
+                             0U);
 }
 
 AUDIO_API audio_client_t audio_open2(audio_type_t audio_type,
@@ -3657,7 +3747,59 @@ AUDIO_API audio_client_t audio_open2(audio_type_t audio_type,
                                      void *callback_userdata,
                                      audio_device_e device)
 {
-    return audio_client_init(audio_type, rwflag, parameter, callback, callback_userdata, device);
+    return audio_client_init(audio_type,
+                             rwflag,
+                             parameter,
+                             callback,
+                             callback_userdata,
+                             device,
+                             NULL,
+                             0U);
+}
+
+/***************************
+ * AUDIO_OpenWithCache: Open an audio client with caller-owned PCM ring memory.
+ * Parameters:
+ *   - eAudioType: Audio client type.
+ *   - eRwFlag: Audio read/write direction.
+ *   - pParameter: Audio format and cache parameters.
+ *   - pCallback: Optional audio event callback.
+ *   - pCallbackContext: Callback context.
+ *   - pRingMemory: Caller-owned ring memory; must remain valid until close.
+ *   - ulRingMemoryBytes: Size of pRingMemory in bytes.
+ * Return value: Audio client handle on success, otherwise NULL.
+ ***************************/
+AUDIO_API audio_client_t AUDIO_OpenWithCache(
+    audio_type_t eAudioType,
+    audio_rwflag_t eRwFlag,
+    audio_parameter_t *pParameter,
+    audio_server_callback_func pCallback,
+    void *pCallbackContext,
+    uint8_t *pRingMemory,
+    uint32_t ulRingMemoryBytes)
+{
+    audio_device_e eDevice;
+
+    eDevice = AUDIO_DEVICE_AUTO;
+    if ((AUDIO_TYPE_BT_VOICE != eAudioType) &&
+            ((eRwFlag & AUDIO_TXRX) == AUDIO_RX))
+    {
+        eDevice = AUDIO_DEVICE_SPEAKER;
+    }
+    if ((AUDIO_TYPE_BT_VOICE == eAudioType) ||
+            ((NULL != pParameter) && (0U != pParameter->is_need_3a)))
+    {
+        eDevice = AUDIO_DEVICE_SPEAKER;
+    }
+
+    return audio_client_init(eAudioType,
+                             eRwFlag,
+                             pParameter,
+                             pCallback,
+                             pCallbackContext,
+                             eDevice,
+                             pRingMemory,
+                             ulRingMemoryBytes);
 }
 
 /**
@@ -3821,8 +3963,16 @@ AUDIO_API int audio_close(audio_client_t handle)
 
     do
     {
-        audio_server_cmt_t *cmd = audio_mem_calloc(1, sizeof(audio_server_cmt_t));
-        RT_ASSERT(cmd);
+        audio_server_cmt_t *cmd =
+            (audio_server_cmt_t *)handle->close_command;
+        if (NULL == cmd)
+        {
+            LOG_E("audio close command missing");
+            handle->magic = AUDIO_CLIENT_MAGIC;
+            unlock();
+            return -RT_ENOMEM;
+        }
+        handle->close_command = NULL;
         cmd->cmd = AUDIO_CMD_CLOSE;
         cmd->client = handle;
         rt_slist_append(&g_server.command_slist, &cmd->snode);

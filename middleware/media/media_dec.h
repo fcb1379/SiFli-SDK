@@ -134,6 +134,11 @@ typedef struct
     void (*mem_free)(void *rmem);
     int (*notify)(uint32_t user_data, ffmpeg_cmd_e cmd, uint32_t val);
 
+    /* Optional caller-owned PCM ring memory.  It must remain valid until
+     * ffmpeg_close() completes; NULL keeps the audio server allocator. */
+    uint8_t        *audio_ring_buffer;
+    uint32_t        audio_ring_buffer_size;
+
     /*only for e_network_frames_stream*/
     uint8_t        *avio_buffer;
     uint32_t       avio_buffer_size;
@@ -173,9 +178,11 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
     for e_network_frames_stream, should stop network downloadint first to avoid memory leak
 */
 void ffmpeg_close(ffmpeg_handle hanlde);
+bool ffmpeg_is_closed(ffmpeg_handle handle);
 void ffmpeg_pause(ffmpeg_handle hanlde);
 void ffmpeg_resume(ffmpeg_handle hanlde);
 void ffmpeg_seek(ffmpeg_handle hanlde, uint32_t second);
+uint32_t ffmpeg_get_duration(ffmpeg_handle hanlde);
 void ffmpeg_audio_mute(ffmpeg_handle hanlde, bool is_mute); //1 mute, 0 unmute
 
 void ffmpeg_eizp_release(uint8_t *ezip);

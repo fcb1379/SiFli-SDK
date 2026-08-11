@@ -99,6 +99,7 @@
 
 #define IS_DCACHED_RAM(addr) (((uint32_t) addr) >= (PSRAM_BASE))
 #define GPU_BLEND_EXP_MS     500
+#define DRV_EPIC_TASK_STACK_BYTES (4096U)
 #define mono_layer_addr HPSYS_RAM1_BASE  //Any accessable address for mono layer, SRAM is better
 
 
@@ -332,7 +333,7 @@ L1_NON_RET_BSS_SECT_BEGIN(drv_epic_stack)
     L1_NON_RET_BSS_SECT(drv_epic_stack, ALIGN(RT_ALIGN_SIZE) static uint8_t drv_epic_mask_buf_pool[mask_buf_max_bytes]);
     L1_NON_RET_BSS_SECT(drv_epic_stack, ALIGN(RT_ALIGN_SIZE) static uint8_t drv_epic_mask_buf2_pool[mask_buf2_max_bytes]);
 #endif /* DRV_EPIC_NEW_API */
-L1_NON_RET_BSS_SECT(drv_epic_stack, ALIGN(RT_ALIGN_SIZE) static uint8_t drv_epic_stack[3072]);
+L1_NON_RET_BSS_SECT(drv_epic_stack, ALIGN(RT_ALIGN_SIZE) static uint8_t drv_epic_stack[DRV_EPIC_TASK_STACK_BYTES]);
 L1_NON_RET_BSS_SECT_END
 
 

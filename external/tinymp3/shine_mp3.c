@@ -385,6 +385,7 @@ typedef struct shine_global_flags {
     l3loop_t l3loop;
     mdct_t mdct;
     subband_t subband;
+    int external_storage;
 } shine_global_config;
 
 
@@ -888,17 +889,10 @@ int shine_samples_per_pass(shine_t s) {
     return s->mpeg.granules_per_frame * GRANULE_SIZE;
 }
 
-/* Compute default encoding values. */
-shine_global_config *shine_initialise(shine_config_t *pub_config) {
+/* Compute default encoding values in a zeroed encoder context. */
+static shine_global_config *shine_initialise_context(shine_config_t *pub_config,
+        shine_global_config *config) {
     double avg_slots_per_frame;
-    shine_global_config *config;
-
-    if (shine_check_config(pub_config->wave.samplerate, pub_config->mpeg.bitr) < 0)
-        return NULL;
-
-    config = rt_calloc(1, sizeof(shine_global_config));
-    if (config == NULL)
-        return config;
 
     shine_subband_initialise(config);
     shine_mdct_initialise(config);
@@ -941,7 +935,17 @@ shine_global_config *shine_initialise(shine_config_t *pub_config) {
     if (config->mpeg.frac_slots_per_frame == 0)
         config->mpeg.padding = 0;
 
-    shine_open_bit_stream(&config->bs, BUFFER_SIZE);
+    if (config->external_storage) {
+        config->bs.data = (unsigned char *)(config + 1);
+        config->bs.data_size = BUFFER_SIZE;
+        config->bs.data_position = 0;
+        config->bs.cache = 0;
+        config->bs.cache_bits = 32;
+    } else {
+        shine_open_bit_stream(&config->bs, BUFFER_SIZE);
+        if (config->bs.data == NULL)
+            return NULL;
+    }
 
     memset((char *) &config->side_info, 0, sizeof(shine_side_info_t));
 
@@ -952,6 +956,45 @@ shine_global_config *shine_initialise(shine_config_t *pub_config) {
         config->sideinfo_len = 8 * ((config->wave.channels == 1) ? 4 + 9 : 4 + 17);
 
     return config;
+}
+
+/* Compute default encoding values. */
+shine_global_config *shine_initialise(shine_config_t *pub_config) {
+    shine_global_config *config;
+
+    if (shine_check_config(pub_config->wave.samplerate, pub_config->mpeg.bitr) < 0)
+        return NULL;
+
+    config = rt_calloc(1, sizeof(shine_global_config));
+    if (config == NULL)
+        return config;
+
+    if (shine_initialise_context(pub_config, config) == NULL) {
+        rt_free(config);
+        return NULL;
+    }
+
+    return config;
+}
+
+size_t shine_get_work_buffer_size(void) {
+    return sizeof(shine_global_config) + BUFFER_SIZE;
+}
+
+shine_global_config *shine_initialise_with_buffer(shine_config_t *pub_config,
+        void *buffer, size_t buffer_size) {
+    shine_global_config *config;
+
+    if (pub_config == NULL || buffer == NULL ||
+            buffer_size < shine_get_work_buffer_size() ||
+            shine_check_config(pub_config->wave.samplerate, pub_config->mpeg.bitr) < 0)
+        return NULL;
+
+    config = (shine_global_config *)buffer;
+    memset(config, 0, sizeof(*config));
+    config->external_storage = 1;
+
+    return shine_initialise_context(pub_config, config);
 }
 
 static unsigned char *shine_encode_buffer_internal(shine_global_config *config, int *written, int stride) {
@@ -1004,8 +1047,15 @@ unsigned char *shine_flush(shine_global_config *config, int *written) {
 
 
 void shine_close(shine_global_config *config) {
-    shine_close_bit_stream(&config->bs);
-    free(config);
+    if (config == NULL)
+        return;
+
+    if (config->external_storage) {
+        memset(config, 0, sizeof(*config));
+    } else {
+        shine_close_bit_stream(&config->bs);
+        rt_free(config);
+    }
 }
 /*
  *  bit_stream.c package

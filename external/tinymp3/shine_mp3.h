@@ -1,6 +1,7 @@
 #ifndef SHINE_MP3_H
 #define SHINE_MP3_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <rtthread.h>
 #include <rtdevice.h>
@@ -126,6 +127,15 @@ int shine_check_config(int freq, int bitr);
  * This function returns NULL if it was not able to allocate memory data for 
  * the encoder. */
 shine_t shine_initialise(shine_config_t *config);
+
+/* Return the number of bytes needed by shine_initialise_with_buffer(). */
+size_t shine_get_work_buffer_size(void);
+
+/* Initialize an encoder in caller-owned, suitably aligned storage. The
+ * storage remains owned by the caller and must stay valid until shine_close(). */
+shine_t shine_initialise_with_buffer(shine_config_t *config,
+                                     void *buffer,
+                                     size_t buffer_size);
 
 /* Maximun possible value for the function below. */
 #define SHINE_MAX_SAMPLES 1152
