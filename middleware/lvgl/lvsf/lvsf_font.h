@@ -151,6 +151,7 @@ void lvsf_font_inital(uint32_t cache_size, bool init);
 void lvsf_font_deinit(void);
 void lvsf_font_load(uint32_t cache_size);
 void lvsf_font_unload(void);
+void lvsf_font_clean_cache_if_pending(void);
 
 extern uint16_t font_pixel_size[];
 void lv_freetype_set_font_size(lv_font_t *font, uint16_t size);

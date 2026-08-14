@@ -2058,6 +2058,22 @@ static inline void statistics_hw_restart(void);
 static inline void statistics_hw_done(void);
 static inline void statistics_hal_start(void);
 static inline void statistics_hal_end(void);
+
+static void release_render_list_letters(priv_render_list_t *rl)
+{
+    for (uint32_t i = 0; i < rl->letter_pool_free; i++)
+    {
+        drv_epic_letter_type_t *letter = &rl->letter_pool[i];
+
+        if (letter->release_callback && letter->release_context)
+        {
+            letter->release_callback(letter->release_context);
+        }
+        letter->release_context = NULL;
+        letter->release_callback = NULL;
+    }
+}
+
 static char *operation_name(drv_epic_op_type_t op)
 {
 #define OP_TO_NAME_CASE(op) case op: return #op
@@ -4341,7 +4357,6 @@ rt_err_t destroy_render_list(drv_epic_render_list_t list)
     rl->flag = 0;
     rl->src_list_len = 0;
     rl->src_list_alloc_len = 0;
-    rl->letter_pool_free = 0;
     rl->used = 0;
     rl->commit_area.x0 = 0;
     rl->commit_area.x1 = -1;
@@ -4751,7 +4766,6 @@ drv_epic_render_list_t drv_epic_alloc_render_list(drv_epic_render_buf *p_buf, EP
             RT_ASSERT(rl->src_list_len == rl->src_list_alloc_len);
             rl->src_list_alloc_len = 0;
             rl->src_list_len = 0;
-            rl->letter_pool_free = 0;
             rl->flag |= rl_flag_overwritting;
             rl_overwrite = rl;
         }
@@ -4763,6 +4777,9 @@ drv_epic_render_list_t drv_epic_alloc_render_list(drv_epic_render_buf *p_buf, EP
 
     if (rl_ret)
     {
+        release_render_list_letters(rl_ret);
+        rl_ret->letter_pool_free = 0;
+
         //Make sure all operations were commited.
         RT_ASSERT(rl_ret->src_list_len == rl_ret->src_list_alloc_len);
         HAL_EPIC_LayerConfigInit(&rl_ret->dst);
@@ -5061,6 +5078,8 @@ drv_epic_letter_type_t *drv_epic_op_alloc_letter(drv_epic_operation *op)
 
     drv_epic_letter_type_t *p_free = &rl->letter_pool[rl->letter_pool_free];
     rl->letter_pool_free++;
+
+    memset(p_free, 0, sizeof(*p_free));
 
 
     if (!op->desc.label.p_letters)

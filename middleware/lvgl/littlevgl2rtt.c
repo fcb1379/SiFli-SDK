@@ -448,7 +448,12 @@ int gui_lib_init(void)
 #endif
     return 0;
 }
+#if defined(AGENT_PET_EXTERNAL_RESOURCES)
+/* The project filesystem is mounted at ENV sublevel 3 before external fonts are loaded. */
+INIT_EXPORT(gui_lib_init, "5", "4");
+#else
 INIT_COMPONENT_EXPORT(gui_lib_init);
+#endif /* AGENT_PET_EXTERNAL_RESOURCES */
 
 static rt_thread_t host_thread = NULL;
 rt_thread_t lvgl_host_thread(void)

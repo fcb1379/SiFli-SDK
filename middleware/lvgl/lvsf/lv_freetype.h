@@ -77,6 +77,8 @@ typedef enum
 
 void lv_freetype_clean_cache(uint8_t clean_type);
 void lv_freetype_set_parameter(uint16_t bpp, uint16_t cache_max_font_size, lv_freetype_extern_cache_t extern_cache);
+void *lv_freetype_take_glyph_cache_node(const uint8_t *bitmap);
+void lv_freetype_release_glyph_cache_node(void *node);
 
 /**********************
  *      MACROS

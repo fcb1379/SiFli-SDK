@@ -132,6 +132,8 @@ typedef struct
 {
     const uint8_t *data;
     EPIC_AreaTypeDef area;
+    void *release_context;
+    void (*release_callback)(void *context);
 } drv_epic_letter_type_t;
 
 

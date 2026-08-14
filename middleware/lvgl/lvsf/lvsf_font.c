@@ -157,6 +157,8 @@ void lv_freetype_set_font_size(lv_font_t *font, uint16_t size)
 
 
 #if USE_CACHE_MANGER
+static bool ft_cache_clean_pending;
+
 uint32_t ft_get_cache_size(void)
 {
     uint32_t max_weight = FT_CACHE_SIZE < 60 * 1024 ? 60 * 1024 : FT_CACHE_SIZE;
@@ -173,11 +175,19 @@ static void ft_clean_cache_cb(void)
 
     if (alloc_size >= ft_get_cache_size())
     {
-        rt_kprintf("lv_freetype_clean_cache %d,%d\n", alloc_size, FT_CACHE_SIZE);
-        lv_freetype_clean_cache(FT_CACHE_WHOLE_CLEAN);
+        ft_cache_clean_pending = true;
     }
 #endif
 
+}
+
+void lvsf_font_clean_cache_if_pending(void)
+{
+    if (ft_cache_clean_pending)
+    {
+        ft_cache_clean_pending = false;
+        lv_freetype_clean_cache(FT_CACHE_WHOLE_CLEAN);
+    }
 }
 
 #include <freetype/internal/ftmemory.h>

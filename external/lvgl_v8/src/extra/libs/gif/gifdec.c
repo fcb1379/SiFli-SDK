@@ -307,7 +307,7 @@ new_table(int key_size)
     int key;
     Table *table = app_cache_alloc(
         sizeof(*table) + sizeof(Entry) * GIF_LZW_TABLE_ENTRY_COUNT,
-        IMAGE_CACHE_PSRAM);
+        IMAGE_CACHE_SRAM);
     if (table) {
         table->bulk = GIF_LZW_TABLE_ENTRY_COUNT;
         table->nentries = (1 << key_size) + 2;

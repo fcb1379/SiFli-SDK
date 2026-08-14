@@ -42,10 +42,20 @@ static FTC_CMapCache cmap_cache;
 /*static FTC_ImageCache image_cache;*/
 static FTC_SBitCache sbit_cache;
 static FTC_SBit sbit;
+static FTC_Node sbit_node;
 
 static uint32_t freetype_cache_size = 0;
 
 extern void FTC_Manager_Cache_Free(FTC_Manager  manager, unsigned int max_weight);
+
+static void release_pending_sbit_node(void)
+{
+    if (sbit_node && cache_manager)
+    {
+        FTC_Node_Unref(sbit_node, cache_manager);
+    }
+    sbit_node = NULL;
+}
 
 /**********************
  *      MACROS
@@ -409,10 +419,21 @@ static bool get_glyph_dsc_cache_cb(const lv_font_t *font, lv_font_glyph_dsc_t *d
     desc_sbit_type.width = 0;
 
     /*FTC_Manager_LookupFace(cache_manager, face, &get_face);*/
+    release_pending_sbit_node();
     charmap_index = FT_Get_Charmap_Index(face->charmap);
     glyph_index = FTC_CMapCache_Lookup(cmap_cache, face, charmap_index, unicode_letter);
-    if (0 == glyph_index) return false;
-    FTC_SBitCache_Lookup(sbit_cache, &desc_sbit_type, glyph_index, &sbit, NULL);
+    if (0 == glyph_index)
+    {
+        lvsf_font_clean_cache_if_pending();
+        return false;
+    }
+    if (FT_Err_Ok != FTC_SBitCache_Lookup(sbit_cache, &desc_sbit_type, glyph_index, &sbit, &sbit_node))
+    {
+        lvsf_font_clean_cache_if_pending();
+        sbit = NULL;
+        return false;
+    }
+    lvsf_font_clean_cache_if_pending();
 
     dsc_out->adv_w = sbit->xadvance;
     dsc_out->box_h = sbit->height;          /*Height of the bitmap in [px]*/
@@ -470,7 +491,7 @@ static bool get_glyph_dsc_cache_cb(const lv_font_t *font, lv_font_glyph_dsc_t *d
     }
 #endif
 
-    return (const uint8_t *)sbit->buffer;
+    return sbit ? (const uint8_t *)sbit->buffer : NULL;
 }
 #else
 static bool get_glyph_dsc_cb(const lv_font_t *font, lv_font_glyph_dsc_t *dsc_out, uint32_t unicode_letter, uint32_t unicode_letter_next)
@@ -693,6 +714,7 @@ void lv_freetype_close_font(void)
     lvsf_font_deinit();
 
 #if USE_CACHE_MANGER
+    release_pending_sbit_node();
     if (cache_manager) FTC_Manager_Done(cache_manager);
     cache_manager = NULL;
 #endif
@@ -706,6 +728,35 @@ void lv_freetype_close_font(void)
         if (g_cache_p) sft_cache_deinit(g_cache_p);
         g_cache_p = NULL;
     }
+#endif
+}
+
+void *lv_freetype_take_glyph_cache_node(const uint8_t *bitmap)
+{
+#if USE_CACHE_MANGER
+    FTC_Node node = NULL;
+
+    if (sbit_node && sbit && (bitmap == (const uint8_t *)sbit->buffer))
+    {
+        node = sbit_node;
+        sbit_node = NULL;
+    }
+
+    return (void *)node;
+#else
+    return NULL;
+#endif
+}
+
+void lv_freetype_release_glyph_cache_node(void *node)
+{
+#if USE_CACHE_MANGER
+    if (node && cache_manager)
+    {
+        FTC_Node_Unref((FTC_Node)node, cache_manager);
+    }
+#else
+    LV_UNUSED(node);
 #endif
 }
 

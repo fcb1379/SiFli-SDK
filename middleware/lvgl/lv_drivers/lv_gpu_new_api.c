@@ -56,6 +56,9 @@
 #include "lv_draw_sw.h"
 #include "lvsf_perf.h"
 #include "lv_gpu_sifli_epic.h"
+#if defined(LV_USING_FREETYPE_ENGINE) && !defined(PKG_SCHRIFT)
+    #include "../lvsf/lv_freetype.h"
+#endif
 
 
 
@@ -458,9 +461,10 @@ static void letter_blend_reset(void)
 
 
 static void letter_blend(lv_img_dsc_t *dest, lv_img_dsc_t *src,
-                         const lv_area_t *src_coords, const lv_area_t *dst_coords,
-                         const lv_area_t *output_coords, lv_opa_t opa, lv_color_t ax_color,
-                         lv_img_cf_t mask_cf, const lv_opa_t *mask_map, const lv_area_t *mask_coords)
+                          const lv_area_t *src_coords, const lv_area_t *dst_coords,
+                          const lv_area_t *output_coords, lv_opa_t opa, lv_color_t ax_color,
+                          lv_img_cf_t mask_cf, const lv_opa_t *mask_map, const lv_area_t *mask_coords,
+                          void *release_context, void (*release_callback)(void *context))
 {
     lv_area_t clipped_output; //Clip output_coords by src_coords
     lv_color32_t ax_color_u32;
@@ -469,7 +473,14 @@ static void letter_blend(lv_img_dsc_t *dest, lv_img_dsc_t *src,
 
     RT_ASSERT((RT_NULL != src_coords) && (RT_NULL != dst_coords) && (RT_NULL != output_coords));
 
-    if (!_lv_area_intersect(&clipped_output, output_coords, src_coords)) return;
+    if (!_lv_area_intersect(&clipped_output, output_coords, src_coords))
+    {
+        if (release_callback && release_context)
+        {
+            release_callback(release_context);
+        }
+        return;
+    }
 
     ax_color_u32.full = lv_color_to32(ax_color);
 
@@ -486,6 +497,8 @@ static void letter_blend(lv_img_dsc_t *dest, lv_img_dsc_t *src,
 
         p_letter->data = src->data;
         LV_AREA_TO_EPIC_AREA(&p_letter->area, src_coords);
+        p_letter->release_context = release_context;
+        p_letter->release_callback = release_callback;
         LV_AREA_TO_EPIC_AREA(&epic_output_area, output_coords);
         HAL_EPIC_AreaJoin(&letter_op->clip_area, &letter_op->clip_area, &epic_output_area);
     }
@@ -568,6 +581,8 @@ static void letter_blend(lv_img_dsc_t *dest, lv_img_dsc_t *src,
 
         p_letter->data = src->data;
         LV_AREA_TO_EPIC_AREA(&p_letter->area, src_coords);
+        p_letter->release_context = release_context;
+        p_letter->release_callback = release_callback;
     }
 }
 
@@ -990,10 +1005,21 @@ static void draw_letter(lv_draw_ctx_t *draw_ctx, const lv_draw_label_dsc_t *dsc,
         dest.header.cf = get_refreshing_disp_buf_cf();
         dest.data_size = lv_img_buf_get_img_size(dest.header.w, dest.header.h, dest.header.cf);
 
+        void *release_context = NULL;
+        void (*release_callback)(void *context) = NULL;
+#if defined(LV_USING_FREETYPE_ENGINE) && !defined(PKG_SCHRIFT)
+        release_context = lv_freetype_take_glyph_cache_node(map_p);
+        if (release_context)
+        {
+            release_callback = lv_freetype_release_glyph_cache_node;
+        }
+#endif
+
         letter_blend(&dest, &src,
                      &letter_area, draw_ctx->buf_area,
                      draw_ctx->clip_area, dsc->opa, dsc->color,
-                     mask_cf, mask_map, &mask_coords);
+                     mask_cf, mask_map, &mask_coords,
+                     release_context, release_callback);
 
 
 
