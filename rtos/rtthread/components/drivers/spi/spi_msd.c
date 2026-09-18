@@ -101,6 +101,14 @@ static uint8_t ones_data[512] =
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 };
 
+/* The SiFli SPI1 DMA driver used by the DevKit completes SD block writes
+ * reliably through its full-duplex path.  Keep the simultaneously received
+ * dummy bytes in a private buffer instead of overwriting FatFs' live sector
+ * cache or selecting the transmit-only DMA path.  Access is serialized by the
+ * SPI bus lock held by the block-device read/write entry points. */
+ALIGN(4)
+static uint8_t write_discard_data[512];
+
 /* function define */
 static rt_bool_t rt_tick_timeout(rt_tick_t tick_start, rt_tick_t tick_long);
 
@@ -487,7 +495,9 @@ static rt_err_t _write_block(struct rt_spi_device *device, const void *buffer, u
     {
         /* initial message */
         message.send_buf = buffer;
-        message.recv_buf = (void *)buffer;
+        RT_ASSERT(sizeof(write_discard_data) >= block_size);
+        /* SPI is full duplex, but these received bytes are dummy values. */
+        message.recv_buf = write_discard_data;
         message.length = block_size;
         message.cs_take = message.cs_release = 0;
 
